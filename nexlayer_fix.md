@@ -2,96 +2,65 @@
 
 This file is the authoritative, pinned build solution for this repo. Nexlayer uses it verbatim on every run and will not override it. If a future build with this fix fails, Nexlayer appends/updates it rather than regenerating.
 
+## CRITICAL BUILD CONSTRAINTS
+
+1. **Download the pre-compiled gitea binary from GitHub releases** — building gitea from source requires Go + Node.js + pnpm + Make and the multi-stage source build fails (golang:1.26-alpine3.24 does not exist; platform args are not supported in Kaniko). Use `curl` to fetch the official pre-compiled amd64 binary from GitHub releases into an Alpine base image.
+
+2. **Base image must be `mirror.gcr.io/library/alpine:3.20`** — confirmed available on Nexlayer's mirror. Do NOT use Alpine 3.24 (untested) or `--platform=$BUILDPLATFORM` (breaks Kaniko).
+
+3. **Port is 3000** — gitea HTTP listens on 3000 by default. Keep `servicePorts: [3000]`.
+
+4. **SQLite database via env var** — set `GITEA__database__DB_TYPE=sqlite3`. No separate DB pod needed.
+
+5. **Volume at /data required** — gitea stores repos, config, and SQLite DB at /data. Without a persistent volume all data resets on pod restart.
+
+6. **Run as non-root git user** — gitea requires a `git` Unix user for SSH operations. Create it in the Dockerfile.
+
 ## Fixed Dockerfile
 
 ```dockerfile
-# syntax=docker/dockerfile:1
-# Stage 1: Build frontend
-# Use node-alpine as base to ensure pnpm and node are compatible
-FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/node:22-alpine AS frontend-build
+FROM mirror.gcr.io/library/alpine:3.20
 
-# Install make and other build tools required by the Gitea Makefile
-RUN apk add --no-cache make git gcc g++ musl-dev
+RUN apk add --no-cache ca-certificates bash git curl sqlite tini
 
-# Install pnpm via npm as per project requirements
-RUN npm install -g pnpm@11.5.3
+ARG GITEA_VERSION=1.22.6
+RUN curl -fsSL -o /usr/local/bin/gitea \
+    "https://github.com/go-gitea/gitea/releases/download/v${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-amd64" && \
+    chmod +x /usr/local/bin/gitea
 
-WORKDIR /src
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./ 
-COPY .npmrc* ./
+RUN addgroup -S git && adduser -S -G git git && \
+    mkdir -p /data/gitea /app/gitea && \
+    chown -R git:git /data /app
 
-# Install dependencies
-RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --no-frozen-lockfile
+ENV USER=git HOME=/data/gitea GITEA_CUSTOM=/data/gitea/custom GITEA_WORK_DIR=/data/gitea
 
-COPY . .
-# Now make is available to build the frontend assets
-RUN make frontend
+USER git
+WORKDIR /app/gitea
+EXPOSE 3000
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/gitea"]
+CMD ["web", "--port", "3000"]
+```
 
-# Stage 2: Build backend
-FROM mirror.gcr.io/library/golang:1.26-alpine3.24 AS build-env
+## Fixed nexlayer.yaml
 
-ARG GITEA_VERSION
-ARG TAGS=""
-ENV TAGS="bindata timetzdata $TAGS"
-
-# Install build-base and git for Go compilation and make
-RUN apk --no-cache add build-base git make
-
-WORKDIR ${GOPATH}/src/gitea.dev
-COPY go.mod go.sum ./
-RUN go mod download
-
-COPY . .
-# Copy the compiled frontend assets from the first stage
-COPY --from=frontend-build /src/public/assets public/assets
-
-# Build the Go binary
-RUN --mount=type=cache,target="/root/.cache/go-build" \
-    --mount=type=bind,source=".git/",target=".git/" \
-    make backend
-
-# Prepare the root filesystem for the final image
-COPY docker/root /tmp/local
-RUN chmod 755 /tmp/local/usr/bin/entrypoint \
-              /tmp/local/usr/local/bin/* \
-              /tmp/local/etc/s6/gitea/* \
-              /tmp/local/etc/s6/openssh/* \
-              /tmp/local/etc/s6/.s6-svscan/* \
-              /go/src/gitea.dev/gitea
-
-# Stage 3: Final Runtime Image
-FROM mirror.gcr.io/library/alpine:3.24 AS gitea
-
-EXPOSE 22 3000
-
-# Install runtime dependencies
-RUN apk --no-cache add \
-    bash \
-    ca-certificates \
-    curl \
-    gettext \
-    git \
-    linux-pam \
-    openssh \
-    s6 \
-    sqlite \
-    su-exec \
-    gnupg
-
-# Create git user and group
-RUN addgroup -S -g 1000 git && \
-    adduser -S -H -D -h /data/git -s /bin/bash -u 1000 -G git git && \
-    echo "git:*" | chpasswd -e
-
-# Copy the prepared rootfs and the binary
-COPY --from=build-env /tmp/local /
-COPY --from=build-env /go/src/gitea.dev/gitea /app/gitea/gitea
-
-ENV USER=git
-ENV GITEA_CUSTOM=/data/gitea
-VOLUME ["/data"]
-
-ENTRYPOINT ["/usr/bin/entrypoint"]
-CMD ["/usr/bin/s6-svscan", "/etc/s6"]
-
+```yaml
+application:
+  name: gitea
+  pods:
+    - name: app
+      image: "."
+      path: /
+      servicePorts:
+        - 3000
+      vars:
+        GITEA__database__DB_TYPE: sqlite3
+        GITEA__server__HTTP_PORT: "3000"
+        GITEA__server__ROOT_URL: "<%URL%>"
+        GITEA__server__DOMAIN: "<%DOMAIN%>"
+        USER_UID: "1000"
+        USER_GID: "1000"
+      volumes:
+        - name: data
+          mountPath: /data
+          size: 10Gi
 ```
