@@ -1,17 +1,17 @@
 application:
   name: gitea
   pods:
-    - name: app
-      image: "mirror.gcr.io/gitea/gitea:1.22"
-      path: /
-      servicePorts:
-        - 3000
-      vars:
-        GITEA__database__DB_TYPE: sqlite3
-        GITEA__server__HTTP_PORT: "3000"
-        GITEA__server__ROOT_URL: "<%URL%>"
-        GITEA__server__DOMAIN: "<%DOMAIN%>"
-      volumes:
-        - name: data
-          mountPath: /data
-          size: 10Gi
+  - name: app
+    image: "mirror.gcr.io/gitea/gitea:1.22"
+    path: /
+    servicePorts:
+    - 3000
+    vars:
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__ROOT_URL: "<%URL%>"
+      GITEA__server__DOMAIN: "<%DOMAIN%>"
+    volumes:
+    - name: gitea-data
+      mountPath: /data
+      size: 10Gi
